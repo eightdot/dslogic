@@ -51,6 +51,22 @@
 
 #define DEV_CAPS_16BIT		(1 << DEV_CAPS_16BIT_POS)
 
+#define DSLOGIC_FPGA_FIRMWARE FIRMWARE_DIR "/dreamsourcelab-dslogic-fpga.fw"
+
+/* Protocol commands */
+#define CMD_GET_FW_VERSION		0xb0
+#define CMD_START			0xb1
+#define CMD_GET_REVID_VERSION		0xb2
+
+#define CMD_START_FLAGS_WIDE_POS	5
+#define CMD_START_FLAGS_CLK_SRC_POS	6
+
+#define CMD_START_FLAGS_SAMPLE_8BIT	(0 << CMD_START_FLAGS_WIDE_POS)
+#define CMD_START_FLAGS_SAMPLE_16BIT	(1 << CMD_START_FLAGS_WIDE_POS)
+
+#define CMD_START_FLAGS_CLK_30MHZ	(0 << CMD_START_FLAGS_CLK_SRC_POS)
+#define CMD_START_FLAGS_CLK_48MHZ	(1 << CMD_START_FLAGS_CLK_SRC_POS)
+
 struct fx2lafw_profile {
 	uint16_t vid;
 	uint16_t pid;
@@ -77,6 +93,10 @@ struct dev_context {
 	 */
 	int64_t fw_updated;
 
+	/* Supported samplerates */
+	const uint64_t *samplerates;
+	int num_samplerates;
+
 	/* Device/capture settings */
 	uint64_t cur_samplerate;
 	uint64_t limit_samples;
@@ -96,10 +116,17 @@ struct dev_context {
 	unsigned int num_transfers;
 	struct libusb_transfer **transfers;
 	struct sr_context *ctx;
+	
+	/* Is this a DSLogic? */
+	gboolean dslogic;
+	uint16_t dslogic_mode;
+	int dslogic_external_clock;
 };
 
 SR_PRIV int fx2lafw_command_start_acquisition(const struct sr_dev_inst *sdi);
-SR_PRIV gboolean fx2lafw_check_conf_profile(libusb_device *dev);
+//SR_PRIV gboolean fx2lafw_check_conf_profile(libusb_device *dev);
+SR_PRIV gboolean match_manuf_prod(libusb_device *dev, const char *manufacturer,
+		const char *product);
 SR_PRIV int fx2lafw_dev_open(struct sr_dev_inst *sdi, struct sr_dev_driver *di);
 SR_PRIV struct dev_context *fx2lafw_dev_new(void);
 SR_PRIV void fx2lafw_abort_acquisition(struct dev_context *devc);

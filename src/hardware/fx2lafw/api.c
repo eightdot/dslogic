@@ -19,6 +19,7 @@
  */
 
 #include "protocol.h"
+#include "dslogic.h"
 
 static const struct fx2lafw_profile supported_fx2[] = {
 	/*
@@ -43,8 +44,20 @@ static const struct fx2lafw_profile supported_fx2[] = {
 	{ 0x08a9, 0x0009, "CWAV", "USBee SX", NULL,
 		FIRMWARE_DIR "/fx2lafw-cwav-usbeesx.fw",
 		0, NULL, NULL},
-
 	/*
+        * DreamSourceLab DSLogic (before FW upload)
+        */
+	{ 0x2a0e, 0x0001, "DreamSourceLab", "DSLogic", NULL,
+		FIRMWARE_DIR "/dreamsourcelab-dslogic-fx2.fw",
+		DEV_CAPS_16BIT, NULL, NULL},
+
+       /*
+        * DreamSourceLab DSLogic (after FW upload)
+        */
+	{ 0x2a0e, 0x0001, "DreamSourceLab", "DSLogic", NULL,
+		FIRMWARE_DIR "/dreamsourcelab-dslogic-fx2.fw",
+		DEV_CAPS_16BIT, "DreamSourceLab", "DSLogic"},
+        /*
 	 * Saleae Logic
 	 * EE Electronics ESLA100
 	 * Robomotic MiniLogic
@@ -123,6 +136,26 @@ static const uint64_t samplerates[] = {
 	SR_MHZ(24),
 };
 
+static const uint64_t dslogic_samplerates[] = {
+	SR_KHZ(10),
+	SR_KHZ(20),
+	SR_KHZ(50),
+	SR_KHZ(100),
+	SR_KHZ(200),
+	SR_KHZ(500),
+	SR_MHZ(1),
+	SR_MHZ(2),
+	SR_MHZ(5),
+	SR_MHZ(10),
+	SR_MHZ(20),
+	SR_MHZ(25),
+	SR_MHZ(50),
+	SR_MHZ(100),
+	SR_MHZ(200),
+	SR_MHZ(400),
+};
+
+
 SR_PRIV struct sr_dev_driver fx2lafw_driver_info;
 static struct sr_dev_driver *di = &fx2lafw_driver_info;
 
@@ -141,6 +174,7 @@ static GSList *scan(GSList *options)
 	struct sr_config *src;
 	const struct fx2lafw_profile *prof;
 	GSList *l, *devices, *conn_devices;
+	gboolean has_firmware;
 	struct libusb_device_descriptor des;
 	libusb_device **devlist;
 	struct libusb_device_handle *hdl;
@@ -265,8 +299,21 @@ static GSList *scan(GSList *options)
 		sdi->priv = devc;
 		drvc->instances = g_slist_append(drvc->instances, sdi);
 		devices = g_slist_append(devices, sdi);
-
-		if (fx2lafw_check_conf_profile(devlist[i])) {
+		if (strcmp(prof->model, "DSLogic")) {
+			devc->dslogic = FALSE;
+			devc->samplerates = samplerates;
+			devc->num_samplerates = ARRAY_SIZE(samplerates);
+			has_firmware = match_manuf_prod(devlist[i],
+			"sigrok", "fx2lafw");
+		} else {
+			devc->dslogic = TRUE;
+			devc->samplerates = dslogic_samplerates;
+			devc->num_samplerates = ARRAY_SIZE(dslogic_samplerates);
+			has_firmware = match_manuf_prod(devlist[i],
+			"DreamSourceLab", "DSLogic");
+		}
+        	if (has_firmware) {
+//		if (fx2lafw_check_conf_profile(devlist[i])) {
 			/* Already has the firmware, so fix the new address. */
 			sr_dbg("Found an fx2lafw device.");
 			sdi->status = SR_ST_INACTIVE;
@@ -361,10 +408,15 @@ static int dev_open(struct sr_dev_inst *sdi)
 
 		return SR_ERR;
 	}
+	if (devc->dslogic) {
+		if ((ret = dslogic_fpga_firmware_upload(sdi,
+			DSLOGIC_FPGA_FIRMWARE)) != SR_OK)
+		return ret;
+	}
 
 	if (devc->cur_samplerate == 0) {
 		/* Samplerate hasn't been set; default to the slowest one. */
-		devc->cur_samplerate = samplerates[0];
+		devc->cur_samplerate = devc->samplerates[0];
 	}
 
 	return SR_OK;
@@ -499,10 +551,11 @@ static int config_set(uint32_t key, GVariant *data, const struct sr_dev_inst *sd
 static int config_list(uint32_t key, GVariant **data, const struct sr_dev_inst *sdi,
 		const struct sr_channel_group *cg)
 {
+	struct dev_context *devc;
 	GVariant *gvar;
 	GVariantBuilder gvb;
 
-	(void)sdi;
+//	(void)sdi;
 	(void)cg;
 
 	switch (key) {
@@ -519,9 +572,13 @@ static int config_list(uint32_t key, GVariant **data, const struct sr_dev_inst *
 					devopts, ARRAY_SIZE(devopts), sizeof(uint32_t));
 		break;
 	case SR_CONF_SAMPLERATE:
+		if (!sdi->priv)
+			return SR_ERR_ARG;
+		devc = sdi->priv;
+
 		g_variant_builder_init(&gvb, G_VARIANT_TYPE("a{sv}"));
-		gvar = g_variant_new_fixed_array(G_VARIANT_TYPE("t"), samplerates,
-				ARRAY_SIZE(samplerates), sizeof(uint64_t));
+		gvar = g_variant_new_fixed_array(G_VARIANT_TYPE("t"), devc->samplerates,
+				devc->num_samplerates, sizeof(uint64_t));
 		g_variant_builder_add(&gvb, "{sv}", "samplerates", gvar);
 		*data = g_variant_builder_end(&gvb);
 		break;
@@ -554,6 +611,114 @@ static int receive_data(int fd, int revents, void *cb_data)
 	return TRUE;
 }
 
+static int start_transfers(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	struct sr_usb_dev_inst *usb;
+	struct libusb_transfer *transfer;
+	unsigned int i, num_transfers;
+	int endpoint, timeout, ret;
+	unsigned char *buf;
+	size_t size;
+
+	devc = sdi->priv;
+	usb = sdi->conn;
+
+	num_transfers = fx2lafw_get_number_of_transfers(devc);
+	size = fx2lafw_get_buffer_size(devc);
+	devc->submitted_transfers = 0;
+
+	devc->transfers = g_try_malloc0(sizeof(*devc->transfers) * num_transfers);
+	if (!devc->transfers) {
+		sr_err("USB transfers malloc failed.");
+		return SR_ERR_MALLOC;
+	}
+
+	timeout = fx2lafw_get_timeout(devc);
+	endpoint = devc->dslogic ? 6 : 2;
+	devc->num_transfers = num_transfers;
+	for (i = 0; i < num_transfers; i++) {
+		if (!(buf = g_try_malloc(size))) {
+			sr_err("USB transfer buffer malloc failed.");
+			return SR_ERR_MALLOC;
+		}
+		transfer = libusb_alloc_transfer(0);
+		libusb_fill_bulk_transfer(transfer, usb->devhdl,
+				endpoint | LIBUSB_ENDPOINT_IN, buf, size,
+				fx2lafw_receive_transfer, devc, timeout);
+		if ((ret = libusb_submit_transfer(transfer)) != 0) {
+			sr_err("Failed to submit transfer: %s.",
+			       libusb_error_name(ret));
+			libusb_free_transfer(transfer);
+			g_free(buf);
+			fx2lafw_abort_acquisition(devc);
+			return SR_ERR;
+		}
+		devc->transfers[i] = transfer;
+		devc->submitted_transfers++;
+	}
+
+	/* Send header packet to the session bus. */
+	std_session_send_df_header(devc->cb_data, LOG_PREFIX);
+
+	return SR_OK;
+}
+
+static void dslogic_trigger_receive(struct libusb_transfer *transfer)
+{
+	const struct sr_dev_inst *sdi;
+	struct dslogic_trigger_pos *tpos;
+
+	sdi = transfer->user_data;
+
+	if (transfer->status == LIBUSB_TRANSFER_COMPLETED
+			&& transfer->actual_length == sizeof(struct dslogic_trigger_pos)) {
+		tpos = (struct dslogic_trigger_pos *)transfer->buffer;
+		sr_dbg("tpos real_pos %.8x ram_saddr %.8x", tpos->real_pos, tpos->ram_saddr);
+		g_free(tpos);
+		start_transfers(sdi);
+	}
+
+	libusb_free_transfer(transfer);
+
+}
+
+static int dslogic_trigger_request(const struct sr_dev_inst *sdi)
+{
+	struct sr_usb_dev_inst *usb;
+	struct libusb_transfer *transfer;
+	struct dslogic_trigger_pos *tpos;
+	int ret;
+
+	usb = sdi->conn;
+
+	if ((ret = dslogic_stop_acquisition(sdi)) != SR_OK)
+		return ret;
+
+	if ((ret = dslogic_fpga_configure(sdi)) != SR_OK)
+		return ret;
+
+	if ((ret = dslogic_start_acquisition(sdi)) != SR_OK)
+		return ret;
+
+	sr_dbg("Getting trigger.");
+	tpos = g_malloc(sizeof(struct dslogic_trigger_pos));
+	transfer = libusb_alloc_transfer(0);
+	libusb_fill_bulk_transfer(transfer, usb->devhdl, 6 | LIBUSB_ENDPOINT_IN,
+			(unsigned char *)tpos, sizeof(struct dslogic_trigger_pos),
+			dslogic_trigger_receive, (void *)sdi, 0);
+	if ((ret = libusb_submit_transfer(transfer)) < 0) {
+		sr_err("Failed to request trigger: %s.", libusb_error_name(ret));
+		libusb_free_transfer(transfer);
+		g_free(tpos);
+		return SR_ERR;
+	}
+
+	return ret;
+}
+
+
+#if 0
 static int dev_acquisition_start(const struct sr_dev_inst *sdi, void *cb_data)
 {
 	struct dev_context *devc;
@@ -632,6 +797,46 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi, void *cb_data)
 	if ((ret = fx2lafw_command_start_acquisition(sdi)) != SR_OK) {
 		fx2lafw_abort_acquisition(devc);
 		return ret;
+	}
+
+	return SR_OK;
+}
+#endif
+
+static int dev_acquisition_start(const struct sr_dev_inst *sdi, void *cb_data)
+{
+	struct drv_context *drvc;
+	struct dev_context *devc;
+	int timeout, ret;
+
+	if (sdi->status != SR_ST_ACTIVE)
+		return SR_ERR_DEV_CLOSED;
+
+	drvc = di->priv;
+	devc = sdi->priv;
+
+	/* Configures devc->trigger_* and devc->sample_wide */
+	if (fx2lafw_configure_channels(sdi) != SR_OK) {
+		sr_err("Failed to configure channels.");
+		return SR_ERR;
+	}
+
+	devc->ctx = drvc->sr_ctx;
+	devc->cb_data = cb_data;
+	devc->sent_samples = 0;
+	devc->empty_transfer_count = 0;
+	devc->acq_aborted = FALSE;
+
+	timeout = fx2lafw_get_timeout(devc);
+	usb_source_add(devc->ctx, timeout, receive_data, NULL);
+
+	if (devc->dslogic) {
+		dslogic_trigger_request(sdi);
+	}
+	else {
+		if ((ret = fx2lafw_command_start_acquisition(sdi)) != SR_OK)
+			return ret;
+		start_transfers(sdi);
 	}
 
 	return SR_OK;
