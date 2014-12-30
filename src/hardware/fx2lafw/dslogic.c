@@ -28,7 +28,8 @@
 #include "protocol.h"
 #include "dslogic.h"
 
-#define FW_BUFSIZE 4096
+//#define FW_BUFSIZE 4096
+#define FW_BUFSIZE 340604 
 int dslogic_fpga_firmware_upload(const struct sr_dev_inst *sdi,
 		const char *filename)
 {
@@ -38,6 +39,8 @@ int dslogic_fpga_firmware_upload(const struct sr_dev_inst *sdi,
 	int chunksize, result, ret;
 	unsigned char *buf;
 	int sum, transferred;
+	unsigned char cmd[16];
+	memset (cmd,0,16);
 
 	sr_dbg("Uploading FPGA firmware at %s.", filename);
 
@@ -50,7 +53,7 @@ int dslogic_fpga_firmware_upload(const struct sr_dev_inst *sdi,
 	/* Tell the device firmware is coming. */
 	if ((ret = libusb_control_transfer(usb->devhdl, LIBUSB_REQUEST_TYPE_VENDOR |
 			LIBUSB_ENDPOINT_OUT, DS_CMD_FPGA_FW, 0x0000, 0x0000,
-			NULL, 0, 3000)) < 0) {
+			cmd, 3, 3000)) < 0) {
 		sr_err("Failed to upload FPGA firmware: %s.", libusb_error_name(ret));
 		return SR_ERR;
 	}
@@ -62,7 +65,7 @@ int dslogic_fpga_firmware_upload(const struct sr_dev_inst *sdi,
 	}
 
 	/* Give the FX2 time to get ready for FPGA firmware upload. */
-	g_usleep(10 * 1000);
+	g_usleep(10 * 10 * 1000);
 
 	sum = 0;
 	result = SR_OK;
@@ -71,8 +74,8 @@ int dslogic_fpga_firmware_upload(const struct sr_dev_inst *sdi,
 			break;
 
 		if ((ret = libusb_bulk_transfer(usb->devhdl, 2 | LIBUSB_ENDPOINT_OUT,
-				buf, chunksize, &transferred, 1000)) < 0) {
-			sr_err("Unable to configure FPGA firmware: %s.",
+				buf, chunksize, &transferred, 1000*10)) < 0) {
+			sr_err("Unable to configure FPGA firmware !!!: %s.",
 					libusb_error_name(ret));
 			result = SR_ERR;
 			break;
