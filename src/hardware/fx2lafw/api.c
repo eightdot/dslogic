@@ -807,7 +807,9 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi, void *cb_data)
 {
 	struct drv_context *drvc;
 	struct dev_context *devc;
+	struct sr_trigger *trigger;
 	int timeout, ret;
+
 
 	if (sdi->status != SR_ST_ACTIVE)
 		return SR_ERR_DEV_CLOSED;
@@ -815,28 +817,44 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi, void *cb_data)
 	drvc = di->priv;
 	devc = sdi->priv;
 
-	/* Configures devc->trigger_* and devc->sample_wide */
-	if (fx2lafw_configure_channels(sdi) != SR_OK) {
-		sr_err("Failed to configure channels.");
-		return SR_ERR;
-	}
+//	old trigger	
+///	/* Configures devc->trigger_* and devc->sample_wide */
+///	if (fx2lafw_configure_channels(sdi) != SR_OK) {
+///		sr_err("Failed to configure channels.");
+///		return SR_ERR;
+///	}
 
 	devc->ctx = drvc->sr_ctx;
 	devc->cb_data = cb_data;
 	devc->sent_samples = 0;
 	devc->empty_transfer_count = 0;
 	devc->acq_aborted = FALSE;
+//new trigger, is this one suitable for dslogic ?
+	if ((trigger = sr_session_trigger_get(sdi->session))) {
+		int pre_trigger_samples = 0;
+		if (devc->limit_samples > 0)
+			pre_trigger_samples = devc->capture_ratio * devc->limit_samples/100;
+		devc->stl = soft_trigger_logic_new(sdi, trigger, pre_trigger_samples);
+		if (devc->stl == NULL)
+			return SR_ERR_MALLOC;
+		devc->trigger_fired = FALSE;
+	} else
+		devc->trigger_fired = TRUE;
 
 	timeout = fx2lafw_get_timeout(devc);
-	usb_source_add(devc->ctx, timeout, receive_data, NULL);
+	usb_source_add(sdi->session,devc->ctx, timeout, receive_data, NULL);
+
+	// start transfer was here?
 
 	if (devc->dslogic) {
 		dslogic_trigger_request(sdi);
 	}
 	else {
-		if ((ret = fx2lafw_command_start_acquisition(sdi)) != SR_OK)
+		if ((ret = fx2lafw_command_start_acquisition(sdi)) != SR_OK) {
+			fx2lafw_abort_acquisition(devc);
 			return ret;
-		start_transfers(sdi);
+		}
+		start_transfers(sdi);		//start moved down here ?
 	}
 
 	return SR_OK;
